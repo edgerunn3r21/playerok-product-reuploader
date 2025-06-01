@@ -376,7 +376,6 @@ async def delete_keyword(
     try:
         pk = int(callback.data.split("_")[-1])
         result = await db.orm_delete(session, db.Keyword, pk)
-        print(result)
         if result:
             await callback.answer("✅ Ключове слово видалено")
         else:
