@@ -259,19 +259,19 @@ class Playerok:
             first_btn = await self.page.wait_for_selector(
                 "button.MuiBox-root.mui-style-3mvi7t"
             )
-            await first_btn.click()
+            # await first_btn.click()
 
-            logger.info("Waiting for and clicking the second button.")
-            second_btn = await self.page.wait_for_selector(
-                "button.MuiBox-root.mui-style-1ljgpjy"
-            )
-            await second_btn.click()
+            # logger.info("Waiting for and clicking the second button.")
+            # second_btn = await self.page.wait_for_selector(
+            #     "button.MuiBox-root.mui-style-1ljgpjy"
+            # )
+            # await second_btn.click()
 
-            logger.info("Waiting for and clicking the third button.")
-            third_btn = await self.page.wait_for_selector(
-                "button.MuiBox-root.mui-style-p0ojd3"
-            )
-            await third_btn.click()
+            # logger.info("Waiting for and clicking the third button.")
+            # third_btn = await self.page.wait_for_selector(
+            #     "button.MuiBox-root.mui-style-p0ojd3"
+            # )
+            # await third_btn.click()
 
             logger.info("Waiting for the result element to appear.")
             element = await self.page.wait_for_selector(
@@ -289,9 +289,6 @@ class Playerok:
             logger.error(f"Error during product update: {e}")
             logger.error(traceback.format_exc())
             return None
-        finally:
-            if self.browser:
-                await self.browser.close()
 
     async def test(self):
         """

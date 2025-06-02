@@ -4,8 +4,8 @@ import traceback
 import json
 import database as db
 
-from aiogram.types import BufferedInputFile, Message
-from sqlalchemy.ext.asyncio import AsyncSession
+from aiogram.types import BufferedInputFile
+from aiogram import Bot
 from playerok import Playerok
 
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 async def reupload_products(
-    playerok: Playerok, session: AsyncSession, message: Message
+    playerok: Playerok, keywords: list, bot: Bot, admin_ids: list,
 ):
     """
     Asynchronously reuploads products by retrieving cards from the Playerok service, filtering them based on keywords from the database,
@@ -38,8 +38,7 @@ async def reupload_products(
     if fix_cards:
         fix_cards = json.loads(fix_cards)
 
-    error_count = 0
-    while error_count <= 10:
+    while True:
         try:
             logger.info("Initializing browser for card retrieval...")
             await playerok.initialize_browser()
@@ -51,7 +50,6 @@ async def reupload_products(
                 logger.warning("No cards retrieved from playerok.")
                 return
 
-            keywords = await db.orm_read(session, db.Keyword, as_iterable=True)
             logger.info(f"Loaded {len(keywords) if keywords else 0} keywords from DB.")
 
             if keywords:
@@ -59,7 +57,7 @@ async def reupload_products(
                 for card in cards:
                     card_lower = card[0].lower()
                     if any(
-                        keyword.keyword.lower() in card_lower for keyword in keywords
+                        keyword.lower() in card_lower for keyword in keywords
                     ):
                         filtered_cards.append(card[1])
                 logger.info(f"Filtered cards count: {len(filtered_cards)}")
@@ -79,12 +77,20 @@ async def reupload_products(
                     if result:
                         logger.info(f"Product updated successfully: {result[1]}")
                         photo = BufferedInputFile(result[0], filename="result.png")
-                        await message.answer_photo(
-                            photo=photo,
-                            caption=f'✅ Товар оновлений 👉 <a href="{result[1]}">Текст посилання</a>',
-                        )
+
+                        for admin_id in admin_ids:
+                            try:
+                                await bot.send_photo(
+                                    chat_id=admin_id,
+                                    photo=photo,
+                                    caption=f'✅ Товар оновлений 👉 <a href="{result[1]}">link</a>',
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to send photo to admin {admin_id}: {e}")
                     else:
                         logger.warning(f"Failed to update product for card: {card}")
+                
+                await playerok.browser.close()
             else:
                 logger.info("No cards found matching the keywords.")
 

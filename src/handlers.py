@@ -6,7 +6,7 @@ import logging
 
 import database as db
 
-from aiogram import Router, F
+from aiogram import Bot, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -17,6 +17,7 @@ from filters import IsAdmin
 from keyboards import get_callback_btns
 from playerok import Playerok
 from utils import reupload_products
+from config import admin_list
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,10 @@ async def auth_code(message: Message, state: FSMContext, session: AsyncSession):
 
 @router.callback_query(F.data == "enable_parser")
 async def enable_parser(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
 ):
     try:
         global parser_taks
@@ -210,7 +214,7 @@ async def enable_parser(
                     "❌ Ви не авторизовані. Будь ласка, спочатку авторизуйтесь."
                 )
                 return
-            
+
             await playerok.initialize_browser()
             if not await playerok.check_auth():
                 await callback.message.answer(
@@ -233,8 +237,17 @@ async def enable_parser(
             await callback.message.answer("✅ Фіксування карт виконано")
             await callback.message.answer("🚀 Запускаю парсер...")
 
+            keywords = await db.orm_read(session, db.Keyword, as_iterable=True)
+            if not keywords:
+                await callback.message.answer(
+                    "❌ Немає ключових слів для парсингу. Будь ласка, додайте їх."
+                )
+                return
+
+            keywords = [keyword.keyword for keyword in keywords]
+            admin_ids = admin_list.split(",")
             parser_taks = asyncio.create_task(
-                reupload_products(playerok, session, callback.message)
+                reupload_products(playerok, keywords, bot, admin_ids)
             )
             await callback.message.edit_text("✅ Парсер увімкнено")
 
