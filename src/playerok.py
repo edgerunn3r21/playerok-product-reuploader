@@ -71,6 +71,7 @@ class Playerok:
             logger.error(
                 f"Failed to send email auth code. Status code: {response.status_code}"
             )
+            logger.error(f"Response content: {response.text}")
             return None
 
     def verify_email_code(self, email, code):

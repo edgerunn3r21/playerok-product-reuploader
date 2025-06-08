@@ -151,6 +151,7 @@ async def auth_email(message: Message, state: FSMContext):
             return
 
         await message.answer("🔐 Введіть код з SMS для завершення авторизації:")
+        await state.update_data(email=email)
         await state.set_state(AuthState.code)
     except Exception as e:
         logger.error(f"Short error message: {e}")
@@ -162,12 +163,14 @@ async def auth_email(message: Message, state: FSMContext):
 async def auth_code(message: Message, state: FSMContext, session: AsyncSession):
     try:
         code = message.text.strip()
-        email = await state.get_data().get("email", None)
+        data = await state.get_data()
+        email = data.get("email", None)
 
         if not code:
             await message.answer("❌ Код не може бути порожнім.")
             return
 
+        print(f"Email: {email}, Code: {code}")  # Debugging line
         result = playerok.verify_email_code(email, code)
 
         if not result:
