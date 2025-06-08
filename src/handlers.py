@@ -18,6 +18,7 @@ from keyboards import get_callback_btns
 from playerok import Playerok
 from utils import reupload_products
 from config import admin_list
+from cron import scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,6 @@ router.message.filter(IsAdmin())
 
 playerok = Playerok()
 
-parser_taks = None
-
 
 def panel_keyboard() -> dict:
     panel_buttons = {
@@ -35,7 +34,7 @@ def panel_keyboard() -> dict:
         "✏️ Редагувати ключові слова ✏️": "edit_keywords",
     }
 
-    if parser_taks and not parser_taks.done():
+    if scheduler.get_job("reupload_products_job"):
         panel_buttons.update({"⛔ Вимкнути парсер ⛔": "disable_parser"})
     else:
         panel_buttons.update({"▶️ Увімкнути парсер ▶️": "enable_parser"})
@@ -95,13 +94,13 @@ class AuthState(StatesGroup):
 @router.callback_query(F.data == "auth")
 async def auth(callback: CallbackQuery, state: FSMContext):
     try:
-        if parser_taks and not parser_taks.done():
+        if scheduler.get_job("reupload_products_job"):
             await callback.answer(
                 "❌ Парсер вже запущено. Вимкніть його перед авторизацією."
             )
             return
 
-        if os.path.exists(playerok.storage_state_path):
+        if os.path.exists(playerok.storage_cookies_path):
             btns = {
                 "✅ Так": "auth_update",
                 "❌ Ні": "panel",
@@ -124,8 +123,8 @@ async def auth(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "auth_update")
 async def auth_update(callback: CallbackQuery, state: FSMContext):
     try:
-        if os.path.exists(playerok.storage_state_path):
-            os.remove(playerok.storage_state_path)
+        if os.path.exists(playerok.storage_cookies_path):
+            os.remove(playerok.storage_cookies_path)
 
         await callback.message.edit_text(
             "🔐 Введіть email для авторизації на Playerok:"
@@ -145,20 +144,10 @@ async def auth_email(message: Message, state: FSMContext):
             await message.answer("❌ Email не може бути порожнім.")
             return
 
-        await playerok.initialize_browser()
-        result = await playerok.auth_first(email)
+        result = playerok.get_email_auth_code(email)
 
-        if result == "email":
-            await message.answer("❌ Помилка при авторизації. Перевірте email.")
-            return
-        elif result == "repeat":
-            await message.answer(
-                "❌ Занадто частий запит на авторизаційний код. Спробуйте пізніше."
-            )
-            return
-
-        if not playerok.page:
-            await message.answer("❌ Помилка при ініціалізації браузера.")
+        if not result:
+            await message.answer("❌ Помилка при авторизації. Спробуйте пізніше.")
             return
 
         await message.answer("🔐 Введіть код з SMS для завершення авторизації:")
@@ -173,21 +162,20 @@ async def auth_email(message: Message, state: FSMContext):
 async def auth_code(message: Message, state: FSMContext, session: AsyncSession):
     try:
         code = message.text.strip()
+        email = await state.get_data().get("email", None)
+
         if not code:
             await message.answer("❌ Код не може бути порожнім.")
             return
 
-        await playerok.auth_second(code)
-        if not playerok.page:
-            await message.answer("❌ Помилка при авторизації.")
-            return
+        result = playerok.verify_email_code(email, code)
 
-        await playerok.initialize_browser()
-        if await playerok.check_auth():
+        if not result:
+            await message.answer("❌ Помилка при авторизації. Перевірте код.")
+            return
+        else:
             await message.answer("✅ Авторизація успішна!")
             await panel(message, state, session)
-        else:
-            await message.answer("❌ Авторизація не вдалася. Перевірте дані.")
     except Exception as e:
         logger.error(f"Short error message: {e}")
         logger.error(traceback.format_exc())
@@ -202,40 +190,18 @@ async def enable_parser(
     bot: Bot,
 ):
     try:
-        global parser_taks
-
-        if parser_taks and not parser_taks.done():
+        if scheduler.get_job("reupload_products_job"):
             await callback.answer("❌ Парсер вже запущено.")
             return
         else:
             await callback.message.edit_text("🔐 Провіряю авторизацію...")
-            if not os.path.exists(playerok.storage_state_path):
+            if not os.path.exists(playerok.storage_cookies_path):
                 await callback.message.answer(
                     "❌ Ви не авторизовані. Будь ласка, спочатку авторизуйтесь."
                 )
                 return
 
-            await playerok.initialize_browser()
-            if not await playerok.check_auth():
-                await callback.message.answer(
-                    "❌ Ви не авторизовані. Будь ласка, спочатку авторизуйтесь."
-                )
-                return
-            await callback.message.answer("✅ Авторизація є, продовжую...")
-
-            await callback.message.answer("🔄 Виконую фіксування наявних карт...")
-            if os.path.exists("src/storage/fix_cards.json"):
-                os.remove("src/storage/fix_cards.json")
-
-            await playerok.initialize_browser()
-            fix_cards = await playerok.get_cards()
-            fix_cards_urls = [url for _, url in fix_cards]
-
-            with open("src/storage/fix_cards.json", "w", encoding="utf-8") as f:
-                json.dump(fix_cards_urls, f, ensure_ascii=False, indent=4)
-
-            await callback.message.answer("✅ Фіксування карт виконано")
-            await callback.message.answer("🚀 Запускаю парсер...")
+            await callback.message.answer("🚀 Парсер запущений")
 
             keywords = await db.orm_read(session, db.Keyword, as_iterable=True)
             if not keywords:
@@ -246,10 +212,15 @@ async def enable_parser(
 
             keywords = [keyword.keyword for keyword in keywords]
             admin_ids = admin_list.split(",")
-            parser_taks = asyncio.create_task(
-                reupload_products(playerok, keywords, bot, admin_ids)
+
+            scheduler.add_job(
+                reupload_products,
+                "interval",
+                minutes=3,
+                id="reupload_products_job",
+                args=[playerok, keywords, bot, admin_ids],
+                replace_existing=True,
             )
-            await callback.message.edit_text("✅ Парсер увімкнено")
 
         await panel(callback.message, state, session)
     except Exception as e:
@@ -263,15 +234,13 @@ async def disable_parser(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ):
     try:
-        global parser_taks
-        if not parser_taks or parser_taks.done():
+        job = scheduler.get_job("reupload_products_job")
+        if not job:
             await callback.answer("❌ Парсер вже вимкнено.")
             return
         else:
-            parser_taks.cancel()
-            parser_taks = None
-
-            await callback.message.edit_text("Парсер вимкнено ❌")
+            scheduler.remove_job("reupload_products_job")
+            await callback.answer("Парсер вимкнено ❌")
 
         await panel(callback.message, state, session)
     except Exception as e:
@@ -399,32 +368,3 @@ async def delete_keyword(
         logger.error(f"Short error message: {e}")
         logger.error(traceback.format_exc())
         await callback.message.answer("Виникла помилка 😞...")
-
-
-@router.message(Command("cards"))
-async def get_cards(message: Message, state: FSMContext, session: AsyncSession):
-    try:
-        await playerok.initialize_browser()
-        cards = await playerok.get_cards()
-        if not cards:
-            await message.answer("❌ Не вдалося отримати карти.")
-            return
-
-        keywords = await db.orm_read(session, db.Keyword, as_iterable=True)
-
-        if keywords:
-            cards = [
-                card
-                for card in cards
-                if any(keyword.keyword in card for keyword in keywords)
-            ]
-            if not cards:
-                await message.answer(
-                    "❌ Не знайдено карт, що відповідають ключовим словам."
-                )
-                return
-
-    except Exception as e:
-        logger.error(f"Short error message: {e}")
-        logger.error(traceback.format_exc())
-        await message.answer("Виникла помилка 😞...")

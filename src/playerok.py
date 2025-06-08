@@ -1,307 +1,271 @@
-import asyncio
-import traceback
-import logging
 import os
-
-from patchright.async_api import async_playwright
-from config import auth_url, profile_url, site_url
+import random
+import cloudscraper
+import logging
 
 logger = logging.getLogger(__name__)
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.113 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.82 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6585.40 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.55 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6602.22 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6610.28 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6627.14 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6671.6 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.6700.2 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6722.1 Safari/537.36",
+]
+
 
 class Playerok:
-    """
-    Class for working with Playwright and automating actions on the Playerok website.
-
-    Main features:
-    - Browser and context initialization
-    - User authentication (email + code)
-    - Authentication check
-    - Retrieving a list of cards
-    - Product update (card update)
-    - Closing the browser
-    """
-
     def __init__(self):
+        self.scraper = cloudscraper.create_scraper()
+        self.headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://playerok.com",
+            "Accept": "application/json",
+            "Accept-Language": "ru-RU",
+            "User-Agent": self.get_random_user_agent(),
+            "Sec-Ch-Ua": '"Google Chrome";v="137", "Chromium";v="137", "Not(A:Brand";v="24"',
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Ch-Ua-Mobile": "?0",
+        }
+        self.url = "https://playerok.com/graphql"
+        self.storage_cookies_path = "src/storage/cookies.txt"
+
+    def get_random_user_agent(self, previous=None):
+        if previous is None:
+            return random.choice(USER_AGENTS)
+        candidates = [ua for ua in USER_AGENTS if ua != previous]
+        if not candidates:
+            return previous
+        return random.choice(candidates)
+
+    def get_email_auth_code(self, email):
         """
-        Initializes browser parameters, user-agent, storage path, and internal variables.
+        Simulate sending an email to the user with a code.
+        In a real application, this would send an email.
         """
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
-        self.launch_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-popup-blocking",
-            "--disable-default-apps",
-        ]
-        self.storage_state_path = "src/storage/storage.json"
-        self.page = None
-        self.browser = None
-        self.context = None
+        payload = {
+            "operationName": "getEmailAuthCode",
+            "variables": {"email": email},
+            "query": "mutation getEmailAuthCode($email: String!) {\n  getEmailAuthCode(input: {email: $email})\n}",
+        }
 
-    async def initialize_browser(self, headless=True):
-        """
-        Starts Playwright, launches the browser, and creates a new context.
-        :param headless: Whether to run the browser in headless mode
-        :return: None or Exception
-        """
-        try:
-            os.makedirs(os.path.dirname(self.storage_state_path), exist_ok=True)
+        logger.info(f"Sending email auth code request for email: {email}")
+        response = self.scraper.post(self.url, json=payload, headers=self.headers)
+        logger.info(f"Response from getEmailAuthCode: {response.status_code}")
 
-            logger.info("Starting Playwright and launching browser...")
-            p = await async_playwright().start()
-            self.browser = await p.chromium.launch(
-                headless=headless,
-                args=self.launch_args,
-                channel="chrome",
-            )
-            logger.info("Browser launched successfully.")
-
-            storage_state_exists = os.path.exists(self.storage_state_path)
-
-            logger.info(f"Storage state path exists: {storage_state_exists}")
-
-            self.context = await self.browser.new_context(
-                locale="ru-RU",
-                user_agent=self.user_agent,
-                viewport={"width": 1920, "height": 1080},
-                storage_state=(
-                    self.storage_state_path if storage_state_exists else None
-                ),
-            )
-            logger.info("Browser context created successfully.")
-        except Exception as e:
-            logger.error(f"Error initializing browser: {e}")
-            logger.error(traceback.format_exc())
-
-            if self.browser:
-                await self.browser.close()
-
-            return None
-
-    async def close(self):
-        """
-        Closes the browser if it is open.
-        """
-        if self.browser:
-            await self.browser.close()
-
-    async def auth_first(self, email):
-        """
-        First step of authentication: enters email, clicks the button, checks for errors.
-        :param email: User's email
-        :return: 'email' if email not found, 'repeat' if request is too frequent, True if successful
-        """
-        try:
-            self.page = await self.context.new_page()
-            await self.page.goto(auth_url)
-
-            await asyncio.sleep(2)
-            await self.page.locator('input[name="email"]').fill(email)
-            await self.page.locator("button[type='submit']").click()
-
-            await asyncio.sleep(3)
-
-            if await self.page.locator(
-                "p", has_text="Такой почты не существует"
-            ).is_visible():
-                logger.error("Email not found during authentication.")
-                return "email"
-            elif await self.page.locator(
-                "p",
-                has_text="Авторизационный код нельзя запрашивать чаще одного раза в 60 секунд",
-            ).is_visible():
-                logger.error("Authorization code request too frequent.")
-                return "repeat"
+        if response.status_code == 200:
+            data = response.json()
+            logger.debug(f"Response JSON: {data}")
+            if "data" in data and "getEmailAuthCode" in data["data"]:
+                logger.info("Email auth code sent successfully.")
+                return data["data"]["getEmailAuthCode"]
             else:
-                logger.info("First authentication step completed successfully.")
-                return True
-        except Exception as e:
-            logger.error(f"Error during first authentication step: {e}")
-            logger.error(traceback.format_exc())
-
-            if self.browser:
-                await self.browser.close()
-
-            return None
-
-    async def auth_second(self, code):
-        """
-        Second step of authentication: enters the code, saves storage state.
-        :param code: Code from SMS
-        :return: None
-        """
-        try:
-            code_inputs = await self.page.locator('input[type="number"]').all()
-
-            for code_input in code_inputs:
-                await code_input.fill(code)
-
-            await asyncio.sleep(3)
-            await self.context.storage_state(path=self.storage_state_path)
-        except Exception as e:
-            logger.error(f"Error during second authentication step: {e}")
-            logger.error(traceback.format_exc())
-            return None
-        finally:
-            if self.browser:
-                await self.browser.close()
-
-    async def check_auth(self):
-        """
-        Checks if authentication was successful (if the profile page opens).
-        :return: True if authentication is successful, False otherwise
-        """
-        try:
-            logger.info("Starting authentication check...")
-            self.page = await self.context.new_page()
-            await self.page.goto(profile_url)
-            logger.info(f"Navigated to {profile_url}")
-
-            await asyncio.sleep(2)
-
-            if auth_url != self.page.url:
-                logger.info(
-                    "Authentication successful, saving storage state and closing browser."
-                )
-                await self.context.storage_state(path=self.storage_state_path)
-                return True
-            else:
-                logger.warning(
-                    "Authentication failed: profile_url not in current page URL."
-                )
-                return False
-        except Exception as e:
-            logger.error(f"Error during authentication check: {e}")
-            logger.error(traceback.format_exc())
-            return None
-        finally:
-            if self.browser:
-                await self.browser.close()
-                logger.info("Browser closed after authentication check.")
-
-    async def get_cards(self) -> list:
-        """
-        Retrieves a list of cards (up to 10) from the user's profile.
-        :return: List of cards (title, url) or None
-        """
-        try:
-            logger.info("Opening new page for card retrieval.")
-            self.page = await self.context.new_page()
-            await self.page.goto(profile_url)
-            logger.info(f"Navigated to {profile_url}")
-
-            active_btn_count = 0
-
-            while active_btn_count <= 5:
-                logger.debug(
-                    "Attempting to click 'Завершённые' button (attempt %d).",
-                    active_btn_count + 1,
-                )
-                done_btn = self.page.locator("a:has-text('Завершённые')")
-                await done_btn.click()
-                done_btn_attr = await done_btn.get_attribute("class")
-
-                if "active" in done_btn_attr:
-                    logger.info("'Завершённые' button is active.")
-                    break
-                else:
-                    active_btn_count += 1
-
-                    if active_btn_count == 5:
-                        logger.warning(
-                            "Button is not active after 5 attempts, exiting test."
-                        )
-                        return None
-
-                    await asyncio.sleep(1)
-
-            logger.info("Waiting for cards container selector.")
-            await self.page.wait_for_selector("div.MuiBox-root.mui-style-vbsxzt")
-
-            cards = (await self.page.locator("div.MuiBox-root.mui-style-4g6ai3").all())[
-                :10
-            ]
-            logger.info("Found %d cards.", len(cards))
-            card_list = []
-
-            if cards:
-                for idx, card in enumerate(cards):
-                    links = await card.locator("a").all()
-                    if len(links) > 1:
-                        title = await links[1].inner_text()
-                        url = await links[1].get_attribute("href")
-                        logger.debug("Card %d title: %s", idx + 1, title)
-                        card_list.append([title, url])
-
-            logger.info("Returning list of card titles.")
-            return card_list
-        except Exception as e:
-            logger.error(f"Error during test: {e}")
-            logger.error(traceback.format_exc())
-            return None
-        finally:
-            if self.browser:
-                await self.browser.close()
-
-    async def update_product(self, product_url):
-        """
-        Updates a product (card) by URL, returns a screenshot and url.
-        :param product_url: Relative product url
-        :return: [screenshot_bytes, url] or None
-        """
-        try:
-            logger.info("Opening new page for product update.")
-            self.page = await self.context.new_page()
-
-            logger.info(f"Navigating to {product_url}")
-            await self.page.goto(site_url + product_url)
-
-            logger.info("Waiting for and clicking the first button.")
-            first_btn = await self.page.wait_for_selector(
-                "button.MuiBox-root.mui-style-3mvi7t"
-            )
-            # await first_btn.click()
-
-            # logger.info("Waiting for and clicking the second button.")
-            # second_btn = await self.page.wait_for_selector(
-            #     "button.MuiBox-root.mui-style-1ljgpjy"
-            # )
-            # await second_btn.click()
-
-            # logger.info("Waiting for and clicking the third button.")
-            # third_btn = await self.page.wait_for_selector(
-            #     "button.MuiBox-root.mui-style-p0ojd3"
-            # )
-            # await third_btn.click()
-
-            logger.info("Waiting for the result element to appear.")
-            element = await self.page.wait_for_selector(
-                "div.MuiBox-root.mui-style-10vt5r9"
-            )
-            if element:
-                await asyncio.sleep(3)
-                logger.info("Element found, taking screenshot.")
-                return [await element.screenshot(), site_url + product_url]
-            else:
-                logger.warning("Element not found, returning None.")
+                logger.warning("Email auth code not found in response.")
                 return None
-
-        except Exception as e:
-            logger.error(f"Error during product update: {e}")
-            logger.error(traceback.format_exc())
+        else:
+            logger.error(
+                f"Failed to send email auth code. Status code: {response.status_code}"
+            )
             return None
 
-    async def test(self):
-        """
-        Test function for manual authentication and navigation check.
-        """
-        try:
-            self.page = await self.context.new_page()
-            await self.page.goto(profile_url)
-            input("Press Enter to continue...")
-        except Exception as e:
-            logger.error(f"Error during authentication check: {e}")
-            logger.error(traceback.format_exc())
+    def verify_email_code(self, email, code):
+        payload = {
+            "operationName": "checkEmailAuthCode",
+            "variables": {"input": {"code": code, "email": email}},
+            "query": "mutation checkEmailAuthCode($input: CheckEmailAuthCodeInput!) { checkEmailAuthCode(input: $input) { ...Viewer __typename } } fragment Viewer on User { id username email role hasFrozenBalance supportChatId systemChatId unreadChatsCounter isBlocked isBlockedFor createdAt lastItemCreatedAt hasConfirmedPhoneNumber canPublishItems profile { id avatarURL testimonialCounter __typename } __typename }",
+        }
+
+        logger.info(f"Verifying email code for email: {email}")
+        response = self.scraper.post(self.url, json=payload, headers=self.headers)
+        logger.info(f"Response from checkEmailAuthCode: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and "checkEmailAuthCode" in data["data"]:
+                cookies = response.cookies.get_dict()
+                logger.info(f"Saving cookies to {self.storage_cookies_path}")
+                with open(self.storage_cookies_path, "w") as f:
+                    for key, value in cookies.items():
+                        f.write(f"{key}={value}\n")
+
+                logger.info("Saving user data to src/storage/user_data.json")
+                with open("src/storage/user_data.json", "w") as f:
+                    f.write(
+                        str(
+                            {
+                                "id": data["data"]["checkEmailAuthCode"]["id"],
+                                "username": data["data"]["checkEmailAuthCode"][
+                                    "username"
+                                ],
+                            }
+                        )
+                    )
+                logger.info("Email code verified successfully.")
+                return data["data"]["checkEmailAuthCode"]
+            else:
+                logger.warning("checkEmailAuthCode not found in response.")
+                return None
+        else:
+            logger.error(
+                f"Failed to verify email code. Status code: {response.status_code}"
+            )
             return None
-        finally:
-            if self.browser:
-                await self.browser.close()
+
+    def get_products(self):
+        count = 0
+        with open("src/storage/count.txt", "a+") as f:
+            f.seek(0)
+            content = f.read().strip()
+            if content:
+                count = int(content)
+            else:
+                logger.warning("Count file is empty, initializing count to 0.")
+
+        if count >= 30:
+            self.scraper = cloudscraper.create_scraper()
+            self.headers["User-Agent"] = self.get_random_user_agent(
+                self.headers.get("User-Agent")
+            )
+            with open("src/storage/count.txt", "w") as f:
+                f.write("0")
+                
+            logger.info(f"User-Agent changed to: {self.headers['User-Agent']}")
+
+        logger.info("Attempting to load cookies and user data for get_products.")
+        if not self.headers.get("Cookie") and os.path.exists(self.storage_cookies_path):
+            with open(self.storage_cookies_path, "r") as f:
+                cookies = [line.strip() for line in f if line.strip()]
+                self.headers["Cookie"] = "; ".join(cookies)
+
+        if not os.path.exists("src/storage/user_data.json"):
+            logger.error("User data file src/storage/user_data.json does not exist.")
+            return None
+
+        user_id = None
+        with open("src/storage/user_data.json", "r") as f:
+            user_data = f.read()
+            if not user_data:
+                logger.error("User data file is empty.")
+                return None
+            else:
+                user_data = eval(user_data)  # Convert string to dictionary
+                user_id = user_data.get("id", None)
+
+        if not user_id:
+            logger.error("User ID not found in user data.")
+            return None
+
+        logger.info(f"Fetching products for user_id: {user_id}")
+        payload = {
+            "operationName": "items",
+            "variables": {
+                "pagination": {"first": 16},
+                "filter": {
+                    "userId": user_id,
+                    "status": ["DECLINED", "BLOCKED", "EXPIRED", "SOLD", "DRAFT"],
+                },
+            },
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "d79d6e2921fea03c5f1515a8925fbb816eacaa7bcafe03eb47a40425ef49601e",
+                }
+            },
+        }
+
+        headers = self.headers.copy()
+        headers["Referer"] = (
+            "https://playerok.com/profile/StanicaShop/products/completed"
+        )
+
+        with open("src/storage/count.txt", "w") as f:
+            count += 1
+            f.write(str(count))
+            logger.info(f"Incremented count to {count}.")
+
+        response = self.scraper.post(self.url, json=payload, headers=self.headers)
+        logger.info(response.request.headers)
+        logger.info(f"Response from items query: {response.status_code}")
+        if response.status_code == 200:
+            logger.info("Successfully fetched products.")
+            return response.json()["data"].get("items").get("edges")
+        else:
+            logger.error(
+                f"Failed to fetch products. Status code: {response.status_code}"
+            )
+            logger.error(f"Response content: {response.text}")
+            self.scraper = (
+                cloudscraper.create_scraper()
+            )  # Recreate scraper to reset headers
+            self.headers["User-Agent"] = self.get_random_user_agent(
+                self.headers.get("User-Agent")
+            )
+            logger.info(
+                f"Retrying with a new User-Agent - {self.headers['User-Agent']}"
+            )
+            return None
+
+    def get_priority_status(self, item_id, price):
+        payload = {
+            "operationName": "itemPriorityStatuses",
+            "variables": {
+                "itemId": item_id,
+                "price": price,
+            },
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "b922220c6f979537e1b99de6af8f5c13727daeff66727f679f07f986ce1c025a",
+                }
+            },
+        }
+
+        logger.info(
+            f"Requesting priority status for item_id: {item_id} with price: {price}"
+        )
+        response = self.scraper.post(self.url, json=payload, headers=self.headers)
+        logger.info(f"Response from itemPriorityStatuses: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and "itemPriorityStatuses" in data["data"]:
+                logger.info("Successfully retrieved priority status.")
+                return data["data"]["itemPriorityStatuses"][0]
+            else:
+                logger.warning("itemPriorityStatuses not found in response.")
+                return None
+        else:
+            logger.error(
+                f"Failed to get priority status. Status code: {response.status_code}"
+            )
+            return None
+
+    def make_transaction(self, item_id, priority_status_id):
+        logger.info(
+            f"Initiating transaction for item_id: {item_id} with priority_status_id: {priority_status_id}"
+        )
+        payload = {
+            "operationName": "publishItem",
+            "variables": {
+                "input": {
+                    "priorityStatuses": [priority_status_id],
+                    "transactionProviderId": "LOCAL",
+                    "transactionProviderData": {"paymentMethodId": None},
+                    "itemId": item_id,
+                }
+            },
+            "query": "mutation publishItem($input: PublishItemInput!) { publishItem(input: $input) { ...RegularItem __typename } } fragment RegularItem on Item { ...RegularMyItem ...RegularForeignItem __typename } fragment RegularMyItem on MyItem { ...ItemFields prevPrice priority sequence priorityPrice statusExpirationDate comment viewsCounter statusDescription editable statusPayment { ...StatusPaymentTransaction __typename } moderator { id username __typename } approvalDate deletedAt createdAt updatedAt mayBePublished prevFeeMultiplier sellerNotifiedAboutFeeChange __typename } fragment ItemFields on Item { id slug name description rawPrice price attributes status priorityPosition sellerType feeMultiplier user { ...ItemUser __typename } buyer { ...ItemUser __typename } attachments { ...PartialFile __typename } category { ...RegularGameCategory __typename } game { ...RegularGameProfile __typename } comment dataFields { ...GameCategoryDataFieldWithValue __typename } obtainingType { ...GameCategoryObtainingType __typename } __typename } fragment ItemUser on UserFragment { ...UserEdgeNode __typename } fragment UserEdgeNode on UserFragment { ...RegularUserFragment __typename } fragment RegularUserFragment on UserFragment { id username role avatarURL isOnline isBlocked rating testimonialCounter createdAt supportChatId systemChatId __typename } fragment PartialFile on File { id url __typename } fragment RegularGameCategory on GameCategory { id slug name categoryId gameId obtaining options { ...RegularGameCategoryOption __typename } props { ...GameCategoryProps __typename } noCommentFromBuyer instructionForBuyer instructionForSeller useCustomObtaining autoConfirmPeriod autoModerationMode agreements { ...RegularGameCategoryAgreement __typename } feeMultiplier __typename } fragment RegularGameCategoryOption on GameCategoryOption { id group label type field value valueRangeLimit { min max __typename } __typename } fragment GameCategoryProps on GameCategoryPropsObjectType { minTestimonials minTestimonialsForSeller __typename } fragment RegularGameCategoryAgreement on GameCategoryAgreement { description gameCategoryId gameCategoryObtainingTypeId iconType id sequence __typename } fragment RegularGameProfile on GameProfile { id name type slug logo { ...PartialFile __typename } __typename } fragment GameCategoryDataFieldWithValue on GameCategoryDataFieldWithValue { id label type inputType copyable hidden required value __typename } fragment GameCategoryObtainingType on GameCategoryObtainingType { id name description gameCategoryId noCommentFromBuyer instructionForBuyer instructionForSeller sequence feeMultiplier agreements { ...MinimalGameCategoryAgreement __typename } props { minTestimonialsForSeller __typename } __typename } fragment MinimalGameCategoryAgreement on GameCategoryAgreement { description iconType id sequence __typename } fragment StatusPaymentTransaction on Transaction { id operation direction providerId status statusDescription statusExpirationDate value props { paymentURL __typename } __typename } fragment RegularForeignItem on ForeignItem { ...ItemFields __typename }",
+        }
+        response = self.scraper.post(self.url, json=payload, headers=self.headers)
+        logger.info(f"Response from publishItem: {response.status_code}")
+        if response.status_code == 200:
+            logger.info("Transaction completed successfully.")
+            return response.json()
+        else:
+            logger.error(
+                f"Failed to complete transaction. Status code: {response.status_code}"
+            )
+            return None

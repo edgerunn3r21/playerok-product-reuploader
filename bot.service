@@ -1,0 +1,12 @@
+[Unit]
+Description=My TG Bot
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/home/user/playerok-product-reuploader/.venv/bin/python /home/user/playerok-product-reuploader/src/run.py
+WorkingDirectory=/home/user/playerok-product-reuploader
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -12,6 +12,7 @@ from database import create_db, drop_db, session_maker
 from handlers import router
 from common import set_admin_commands
 from config import token, admin_list
+from cron import scheduler
 
 # Create directories if they don't exist
 os.makedirs("logs", exist_ok=True)
@@ -23,9 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-bot = Bot(
-    token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 admin_list = admin_list.replace(" ", "").split(",") if admin_list else None
 bot.my_admins_list = admin_list if admin_list else []
@@ -49,6 +48,8 @@ async def main():
     dp.shutdown.register(on_shutdown)
 
     dp.update.middleware(DataBaseSession(session_pool=session_maker))
+
+    scheduler.start()  # запуск шедулера
 
     await bot.delete_webhook(drop_pending_updates=True)
 
