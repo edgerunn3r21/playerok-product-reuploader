@@ -1,5 +1,3 @@
-import json
-import asyncio
 import os
 import traceback
 import logging
@@ -16,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from filters import IsAdmin
 from keyboards import get_callback_btns
 from playerok import Playerok
-from utils import reupload_products
+from utils import reupload_products, autolift_products
 from config import admin_list
 from cron import scheduler
 
@@ -31,13 +29,19 @@ playerok = Playerok()
 def panel_keyboard() -> dict:
     panel_buttons = {
         "🔐 Авторизація 🔐": "auth",
-        "✏️ Редагувати ключові слова ✏️": "edit_keywords",
+        "✏️ Редагувати ключові слова для парсера ✏️": "edit_keywords",
+        "✏️ Редагувати ключові слова для автопідняття ✏️": "edit_autolift_keywords",
     }
 
     if scheduler.get_job("reupload_products_job"):
         panel_buttons.update({"⛔ Вимкнути парсер ⛔": "disable_parser"})
     else:
         panel_buttons.update({"▶️ Увімкнути парсер ▶️": "enable_parser"})
+
+    if scheduler.get_job("autolift_job"):
+        panel_buttons.update({"⛔ Вимкнути автопідняття ⛔": "disable_autolift"})
+    else:
+        panel_buttons.update({"▶️ Увімкнути автопідняття ▶️": "enable_autolift"})
 
     return panel_buttons
 
@@ -366,7 +370,245 @@ async def delete_keyword(
         else:
             await callback.answer("❌ Помилка при видаленні ключового слова")
 
+        keywords = await db.orm_read(session, db.Keyword, as_iterable=True)
+        if not keywords:
+            await callback.message.edit_text(
+                "❌ Немає ключових слів для автопідняття ❌",
+                reply_markup=get_callback_btns(
+                    btns={"⬅️ Назад": "edit_autolift_keywords"},
+                    sizes=(1,),
+                ),
+            )
+            return
+
         await delete_keywords(callback, state, session)
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await callback.message.answer("Виникла помилка 😞...")
+
+
+@router.callback_query(F.data == "edit_autolift_keywords")
+async def edit_autolift_keywords(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    try:
+        autolift_keywords = await db.orm_read(
+            session, db.AutoliftKeyword, as_iterable=True
+        )
+        autolift_buttons = {
+            "➕ Додати ключові слова для автопідняття": "add_autolift_keywords",
+            "➖ Видалити ключові слова для автопідняття": "delete_autolift_keywords",
+            "⬅️ Назад": "panel",
+        }
+        message_text = "🔑 Ключові слова для автопідняття 🔑\n\n"
+
+        if autolift_keywords:
+            for keyword in autolift_keywords:
+                message_text += f"{keyword.keyword}: <i>{keyword.position}</i>\n"
+
+        await callback.message.edit_text(
+            message_text,
+            reply_markup=get_callback_btns(btns=autolift_buttons, sizes=(1,)),
+        )
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await callback.message.answer("Виникла помилка 😞...")
+
+
+class EditAutoliftKeywordsState(StatesGroup):
+    keyword = State()
+
+
+@router.callback_query(F.data == "add_autolift_keywords")
+async def add_autolift_keywords(callback: CallbackQuery, state: FSMContext):
+    try:
+        await callback.message.edit_text(
+            '🔑 Введіть ключові слова для автопідняття\nПриклад: "акція: 200, моментально: 150, особливий розпродаж: 50"'
+        )
+        await state.set_state(EditAutoliftKeywordsState.keyword)
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await callback.message.answer("Виникла помилка 😞...")
+
+
+@router.message(EditAutoliftKeywordsState.keyword)
+async def set_autolift_keywords(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    try:
+        keywords = message.text.split(",")
+        keywords = [keyword.strip() for keyword in keywords if keyword.strip()]
+
+        if not keywords:
+            await message.answer("❌ Ключові слова не можуть бути порожніми.")
+            return
+
+        for keyword in keywords:
+            parts = keyword.split(":")
+            if len(parts) != 2:
+                await message.answer(
+                    f"❌ Неправильний формат ключового слова: {keyword}"
+                )
+                return
+
+            kw, position = parts[0].strip().lower(), int(parts[1].strip())
+            result = await db.orm_create(
+                session, db.AutoliftKeyword, {"keyword": kw, "position": position}
+            )
+            if not result:
+                await message.answer(f"❌ Помилка при додаванні ключового слова: {kw}")
+                return
+
+        await message.answer(
+            f"✅ Ключові слова для автопідняття встановлено: {', '.join(keywords)}"
+        )
+
+        await state.clear()
+        await panel(message, state, session)
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await message.answer(
+            "❌ Помилка при встановленні ключових слів для автопідняття. Перевірте формат."
+        )
+
+
+@router.callback_query(F.data == "delete_autolift_keywords")
+async def delete_autolift_keywords(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    try:
+        autolift_keywords = await db.orm_read(
+            session, db.AutoliftKeyword, as_iterable=True
+        )
+        if not autolift_keywords:
+            await callback.answer("❌ Немає ключових слів для автопідняття ❌")
+            return
+
+        btns = {
+            "⬅️ Назад": "edit_autolift_keywords",
+        }
+
+        for keyword in autolift_keywords:
+            btns[keyword.keyword] = f"delete_autolift_keyword_{keyword.pk}"
+
+        await callback.message.edit_text(
+            "👇 Виберіть ключові слова для видалення 👇",
+            reply_markup=get_callback_btns(
+                btns=btns,
+                sizes=(1,),
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await callback.message.answer("Виникла помилка 😞...")
+
+
+@router.callback_query(F.data.startswith("delete_autolift_keyword_"))
+async def delete_autolift_keyword(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    try:
+        pk = int(callback.data.split("_")[-1])
+        result = await db.orm_delete(session, db.AutoliftKeyword, pk)
+        if result:
+            await callback.answer("✅ Ключове слово для автопідняття видалено")
+        else:
+            await callback.answer(
+                "❌ Помилка при видаленні ключового слова для автопідняття"
+            )
+
+        autolift_keywords = await db.orm_read(
+            session, db.AutoliftKeyword, as_iterable=True
+        )
+        if not autolift_keywords:
+            await callback.message.edit_text(
+                "❌ Немає ключових слів для автопідняття ❌",
+                reply_markup=get_callback_btns(
+                    btns={"⬅️ Назад": "edit_autolift_keywords"},
+                    sizes=(1,),
+                ),
+            )
+            return
+
+        await delete_autolift_keywords(callback, state, session)
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await callback.message.answer("Виникла помилка 😞...")
+
+
+@router.callback_query(F.data == "enable_autolift")
+async def enable_autolift(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+):
+    try:
+        if scheduler.get_job("autolift_job"):
+            await callback.answer("❌ Автопідняття вже запущено.")
+            return
+        else:
+            await callback.message.edit_text("🔐 Провіряю авторизацію...")
+
+            if not os.path.exists(playerok.storage_cookies_path):
+                await callback.message.answer(
+                    "❌ Ви не авторизовані. Будь ласка, спочатку авторизуйтесь."
+                )
+                return
+
+            await callback.message.answer("🚀 Автопідняття запущено")
+
+            autolift_keywords = await db.orm_read(
+                session, db.AutoliftKeyword, as_iterable=True
+            )
+            if not autolift_keywords:
+                await callback.message.answer(
+                    "❌ Немає ключових слів для автопідняття. Будь ласка, додайте їх."
+                )
+                return
+
+            autolift_keywords = [
+                {"keyword": kw.keyword, "position": kw.position}
+                for kw in autolift_keywords
+            ]
+            admin_ids = admin_list.split(",")
+
+            scheduler.add_job(
+                autolift_products,
+                "interval",
+                minutes=5,
+                id="autolift_job",
+                args=[playerok, autolift_keywords, bot, admin_ids],
+                replace_existing=True,
+            )
+
+        await panel(callback.message, state, session)
+    except Exception as e:
+        logger.error(f"Short error message: {e}")
+        logger.error(traceback.format_exc())
+        await callback.message.answer("Виникла помилка 😞...")
+
+
+@router.callback_query(F.data == "disable_autolift")
+async def disable_autolift(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    try:
+        job = scheduler.get_job("autolift_job")
+        if not job:
+            await callback.answer("❌ Автопідняття вже вимкнено.")
+            return
+        else:
+            scheduler.remove_job("autolift_job")
+            await callback.answer("Автопідняття вимкнено ❌")
+
+        await panel(callback.message, state, session)
     except Exception as e:
         logger.error(f"Short error message: {e}")
         logger.error(traceback.format_exc())

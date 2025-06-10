@@ -116,7 +116,33 @@ class Playerok:
             )
             return None
 
-    def get_products(self):
+    def get_product(self, slug):
+        params = {
+            "operationName": "item",
+            "variables": f'{{"slug":"{slug}"}}',
+            "extensions": '{"persistedQuery":{"version":1,"sha256Hash":"e359f060312bb73e464c78e153bbef81dc071bfa366eeefd5a730dd572c41ccb"}}'
+        }
+
+        if not self.headers.get("Cookie") and os.path.exists(self.storage_cookies_path):
+            with open(self.storage_cookies_path, "r") as f:
+                cookies = [line.strip() for line in f if line.strip()]
+                self.headers["Cookie"] = "; ".join(cookies)
+
+        logger.info(f"Requesting product details for slug: {slug} (GET request)")
+        response = self.scraper.get(self.url, headers=self.headers, params=params)
+        logger.info(f"Response from item query: {response.status_code}")
+
+        if response.status_code == 200:
+            logger.info("Successfully fetched product details.")
+            return response.json()["data"].get("item")
+        else:
+            logger.error(
+                f"Failed to fetch product details. Status code: {response.status_code}"
+            )
+            logger.error(f"Response content: {response.text}")
+            return None
+
+    def get_products(self, status_type="done"):
         count = 0
         with open("src/storage/count.txt", "a+") as f:
             f.seek(0)
@@ -133,7 +159,7 @@ class Playerok:
             )
             with open("src/storage/count.txt", "w") as f:
                 f.write("0")
-                
+
             logger.info(f"User-Agent changed to: {self.headers['User-Agent']}")
 
         logger.info("Attempting to load cookies and user data for get_products.")
@@ -160,6 +186,12 @@ class Playerok:
             logger.error("User ID not found in user data.")
             return None
 
+        status = []
+        if status_type == "done":
+            status = ["DECLINED", "BLOCKED", "EXPIRED", "SOLD", "DRAFT"]
+        elif status_type == "active":
+            status = ["APPROVED", "PENDING_MODERATION", "PENDING_APPROVAL"]
+
         logger.info(f"Fetching products for user_id: {user_id}")
         payload = {
             "operationName": "items",
@@ -167,7 +199,7 @@ class Playerok:
                 "pagination": {"first": 16},
                 "filter": {
                     "userId": user_id,
-                    "status": ["DECLINED", "BLOCKED", "EXPIRED", "SOLD", "DRAFT"],
+                    "status": status,
                 },
             },
             "extensions": {
@@ -268,5 +300,31 @@ class Playerok:
         else:
             logger.error(
                 f"Failed to complete transaction. Status code: {response.status_code}"
+            )
+            return None
+
+    def make_autolift(self, item_id, priority_status_id):
+        payload = {
+            "operationName": "increaseItemPriorityStatus",
+            "variables": {
+                "input": {
+                    "itemId": item_id,
+                    "priorityStatuses": [priority_status_id],
+                    "transactionProviderData": {"paymentMethodId": None},
+                    "transactionProviderId": "LOCAL",
+                }
+            },
+            "query": "mutation increaseItemPriorityStatus($input: PublishItemInput!) { increaseItemPriorityStatus(input: $input) { ...RegularItem __typename } } fragment RegularItem on Item { ...RegularMyItem ...RegularForeignItem __typename } fragment RegularMyItem on MyItem { ...ItemFields prevPrice priority sequence priorityPrice statusExpirationDate comment viewsCounter statusDescription editable statusPayment { ...StatusPaymentTransaction __typename } moderator { id username __typename } approvalDate deletedAt createdAt updatedAt mayBePublished prevFeeMultiplier sellerNotifiedAboutFeeChange __typename } fragment ItemFields on Item { id slug name description rawPrice price attributes status priorityPosition sellerType feeMultiplier user { ...ItemUser __typename } buyer { ...ItemUser __typename } attachments { ...PartialFile __typename } category { ...RegularGameCategory __typename } game { ...RegularGameProfile __typename } comment dataFields { ...GameCategoryDataFieldWithValue __typename } obtainingType { ...GameCategoryObtainingType __typename } __typename } fragment ItemUser on UserFragment { ...UserEdgeNode __typename } fragment UserEdgeNode on UserFragment { ...RegularUserFragment __typename } fragment RegularUserFragment on UserFragment { id username role avatarURL isOnline isBlocked rating testimonialCounter createdAt supportChatId systemChatId __typename } fragment PartialFile on File { id url __typename } fragment RegularGameCategory on GameCategory { id slug name categoryId gameId obtaining options { ...RegularGameCategoryOption __typename } props { ...GameCategoryProps __typename } noCommentFromBuyer instructionForBuyer instructionForSeller useCustomObtaining autoConfirmPeriod autoModerationMode agreements { ...RegularGameCategoryAgreement __typename } feeMultiplier __typename } fragment RegularGameCategoryOption on GameCategoryOption { id group label type field value valueRangeLimit { min max __typename } __typename } fragment GameCategoryProps on GameCategoryPropsObjectType { minTestimonials minTestimonialsForSeller __typename } fragment RegularGameCategoryAgreement on GameCategoryAgreement { description gameCategoryId gameCategoryObtainingTypeId iconType id sequence __typename } fragment RegularGameProfile on GameProfile { id name type slug logo { ...PartialFile __typename } __typename } fragment GameCategoryDataFieldWithValue on GameCategoryDataFieldWithValue { id label type inputType copyable hidden required value __typename } fragment GameCategoryObtainingType on GameCategoryObtainingType { id name description gameCategoryId noCommentFromBuyer instructionForBuyer instructionForSeller sequence feeMultiplier agreements { ...MinimalGameCategoryAgreement __typename } props { minTestimonialsForSeller __typename } __typename } fragment MinimalGameCategoryAgreement on GameCategoryAgreement { description iconType id sequence __typename } fragment StatusPaymentTransaction on Transaction { id operation direction providerId status statusDescription statusExpirationDate value props { paymentURL __typename } __typename } fragment RegularForeignItem on ForeignItem { ...ItemFields __typename }",
+        }
+
+        response = self.scraper.post(self.url, json=payload, headers=self.headers)
+        logger.info(f"Response from autoliftItem: {response.status_code}")
+
+        if response.status_code == 200:
+            logger.info("Autolift request completed successfully.")
+            return response.json()
+        else:
+            logger.error(
+                f"Failed to autolift item. Status code: {response.status_code}"
             )
             return None

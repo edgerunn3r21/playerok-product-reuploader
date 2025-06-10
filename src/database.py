@@ -49,6 +49,12 @@ class Keyword(Base):
     pk: Mapped[int] = mapped_column(primary_key=True)
     keyword: Mapped[str] = mapped_column(String(1024), unique=True)
 
+class AutoliftKeyword(Base):
+    __tablename__ = "autolift_keyword"
+
+    pk: Mapped[int] = mapped_column(primary_key=True)
+    keyword: Mapped[str] = mapped_column(String(1024), unique=True)
+    position: Mapped[int] = mapped_column()
 
 async def orm_create(session: AsyncSession, model: object, data: dict):
     try:
